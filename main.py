@@ -75,19 +75,25 @@ async def slack_events(request: Request):
                 )
                 message_url = link_resp.json().get("permalink")
 
+                # スタンプの数取得
+                brain, bulb, footprints = await _get_reaction_counts(client, channel, ts, headers)
+
                 # GoogleスライドURL抽出
                 slide_url = _extract_slide_url(text)
+
+                # コメントを抽出
+                comments = await _get_thread_comments(client, channel, ts, headers)
 
             # Notionへ送信
             await create_slack_message_row(
                 author=author_name,
                 text=text,
-                brain=0,
-                bulb=0,
-                footprints=0,
-                comments="",
+                brain=brain,
+                bulb=bulb,
+                footprints=footprints,
+                comments=comments,
                 message_url=message_url,
-                slide_url=None,
+                slide_url=slide_url,
             )
 
     return {"ok": True}
@@ -97,3 +103,81 @@ def _extract_slide_url(text: str):
     pattern = r"(https?://docs\.google\.com/presentation/[^\s>]+)"
     match = re.search(pattern, text)
     return match.group(1) if match else None
+
+# スタンプの数を取ってくる関数
+async def _get_reaction_counts(client: httpx.AsyncClient, channel: str, ts: str, headers: dict):
+    """
+    指定メッセージのリアクション一覧をSlackから取得して
+    brain / bulb / footprints の数だけ返す
+    """
+    resp = await client.get(
+        f"{SLACK_API_BASE}/reactions.get",
+        params={"channel": channel, "timestamp": ts},
+        headers=headers,
+    )
+    data = resp.json()
+
+    brain = bulb = footprints = 0
+
+    # reactions.get に成功していれば message.reactions がある
+    if data.get("ok") and "message" in data and "reactions" in data["message"]:
+        for r in data["message"]["reactions"]:
+            name = r.get("name")
+            count = r.get("count", 0)
+            if name == "brain":
+                brain = count
+            elif name == "bulb":
+                bulb = count
+            elif name == "footprints":
+                footprints = count
+
+    return brain, bulb, footprints
+
+async def _get_thread_comments(
+    client: httpx.AsyncClient, channel: str, ts: str, headers: dict
+) -> str:
+    """
+    特定メッセージのスレッド内コメントを取得し、
+    「ユーザー名: コメント内容」を改行区切りで連結して返す
+    """
+    comments_text = []
+
+    # スレッド（リプライ）を取得
+    resp = await client.get(
+        f"{SLACK_API_BASE}/conversations.replies",
+        params={"channel": channel, "ts": ts},
+        headers=headers,
+    )
+    data = resp.json()
+
+    if not data.get("ok"):
+        return ""
+
+    messages = data.get("messages", [])
+    if len(messages) <= 1:
+        # 親メッセージしかない（コメントなし）
+        return ""
+
+    # 親メッセージ以外（2つ目以降）がコメント
+    for msg in messages[1:]:
+        user_id = msg.get("user")
+        text = msg.get("text", "").strip()
+
+        # 投稿者名を取得
+        user_name = None
+        if user_id:
+            user_resp = await client.get(
+                f"{SLACK_API_BASE}/users.info",
+                params={"user": user_id},
+                headers=headers,
+            )
+            if user_resp.json().get("ok"):
+                user_name = user_resp.json()["user"]["real_name"]
+
+        if user_name and text:
+            comments_text.append(f"{user_name}: {text}")
+        elif text:
+            comments_text.append(text)
+
+    # 改行でつなげる
+    return "\n".join(comments_text)

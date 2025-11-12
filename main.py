@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request, HTTPException
 from app.slack_verifier import verify_slack_request
 from app.notion_client import create_slack_message_row
+from datetime import datetime, timezone, timedelta
 import os
 import httpx
 import re
@@ -15,6 +16,7 @@ async def slack_events(request: Request):
     body = await request.body()
     timestamp = request.headers.get("X-Slack-Request-Timestamp")
     signature = request.headers.get("X-Slack-Signature")
+    retry_num = request.headers.get("X-Slack-Retry-Num")  # ← リトライ検知
     json_body = await request.json()
 
     # SlackのURL確認用
@@ -25,6 +27,10 @@ async def slack_events(request: Request):
     if timestamp and signature:
         if not verify_slack_request(timestamp, signature, body):
             raise HTTPException(status_code=403, detail="invalid signature")
+
+    # リトライは処理せず200だけ返す
+    if retry_num is not None:
+        return {"ok": True}
 
     event = json_body.get("event", {})
     if event.get("type") == "reaction_added":
@@ -94,7 +100,25 @@ async def slack_events(request: Request):
                 comments=comments,
                 message_url=message_url,
                 slide_url=slide_url,
+                date=_ts_to_iso_date(ts)
             )
+
+            try:
+                async with httpx.AsyncClient() as client2:
+                    await client2.post(
+                        f"{SLACK_API_BASE}/chat.postMessage",
+                        headers={
+                            "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+                            "Content-Type": "application/json; charset=utf-8",
+                        },
+                        json={
+                            "channel": channel,       # もとのチャンネル
+                            "thread_ts": ts,          # 親メッセージのスレッドにぶら下げる
+                            "text": "Notionに保存しました ✅",
+                        },
+                    )
+            except Exception as e:
+                print("Slack notify error:", e)  # ACKは返す（リトライ防止）
 
     return {"ok": True}
 
@@ -181,3 +205,9 @@ async def _get_thread_comments(
 
     # 改行でつなげる
     return "\n".join(comments_text)
+
+def _ts_to_iso_date(ts: str, tz_hours: int = 9) -> str:
+    """Slack ts → 'YYYY-MM-DD'（日付だけ欲しいとき）"""
+    tz = timezone(timedelta(hours=tz_hours))
+    dt = datetime.fromtimestamp(float(ts), tz=tz)
+    return dt.date().isoformat()

@@ -36,7 +36,7 @@ async def create_slack_message_row(
     if slide_url:
         props["Slide URL"] = {"url": slide_url}
     if date:
-        props["日付"] = {"date": {"start": date}}
+        props["Date"] = {"date": {"start": date}}
 
     data = {
         "parent": {"database_id": NOTION_DATABASE_ID},
